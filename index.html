@@ -18,6 +18,11 @@
   html, body { margin:0; height:100%; overflow:hidden; background:transparent; font-family:system-ui, sans-serif; }
   body.bg-green { background:#00ff00; }
   body.bg-dark  { background:#1e1e24; }
+  /* Свій фон (фото з файла чи камери) і live-відео з камери: на весь екран під аватаром, з обрізкою країв */
+  #bgImg, #bgVideo { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; display:none; pointer-events:none; }
+  #bgVideo.mirror { transform:scaleX(-1); }   /* фронтальна камера — дзеркально, як у дзеркалі */
+  body.bg-custom #bgImg, body.bg-live #bgVideo { display:block; }
+  body.bg-custom, body.bg-live { background:#000; }
 
   /* Сцена з аватаром: усі спрайти лежать стопкою, видимий лише один (без мерехтіння при заміні src) */
   #stage { position:absolute; inset:0; display:flex; align-items:flex-end; justify-content:center; }
@@ -85,6 +90,8 @@
   </div>
 </noscript>
 
+<img id="bgImg" alt="">
+<video id="bgVideo" playsinline muted></video>
 <div id="stage"><div id="rig"></div></div>
 
 <div id="panel">
@@ -98,6 +105,13 @@
     <button id="shoutBtn" class="hold">📢 Кричати</button>
     <button id="bgBtn">🎨 Фон</button>
   </div>
+  <!-- Свій фон: картинка з файла, фото з камери або живе відео з камери. Усе лишається в браузері. -->
+  <div class="btns">
+    <button id="fileBtn">🖼 Файл</button>
+    <button id="photoBtn">📷 Фото</button>
+    <button id="liveBtn">🔴 Live</button>
+  </div>
+  <input id="bgFile" type="file" accept="image/*" hidden>
 
   <div class="row"><label>Гучність</label><div class="meter"><div id="mLevel"></div></div></div>
   <div class="row"><label>Інтенсивність</label><div class="meter"><div id="mInt"></div></div></div>
@@ -118,7 +132,7 @@
   <div class="hint kbd">
     1–5 — емоція вручну · 0 — авто<br>
     Пробіл — демо-голос · Shift+Пробіл — крик<br>
-    B — фон (темний / прозорий / зелений) · H — сховати панель
+    B — фон (темний / прозорий / зелений / свій) · H — сховати панель
   </div>
 </div>
 
@@ -564,13 +578,118 @@ idleSel.onchange = () => {
   try { localStorage.setItem('pngtuber', JSON.stringify(saved)); } catch {}
 };
 
-/* Фон: темний → прозорий (OBS) → зелений (хромакей) */
-const BGS = ['bg-dark', '', 'bg-green'];
-let bgI = 0;
-function cycleBg() {
-  bgI = (bgI + 1) % BGS.length;
-  document.body.className = BGS[bgI];
+/* Фон: темний → прозорий (OBS) → зелений (хромакей) → свій (якщо завантажено); live — окремою кнопкою.
+   Відео з камери нікуди не надсилається; фото зберігається лише в localStorage цього браузера. */
+const bgImg = document.getElementById('bgImg');
+const bgVideo = document.getElementById('bgVideo');
+const photoBtn = document.getElementById('photoBtn');
+const liveBtn = document.getElementById('liveBtn');
+const BG_KEY = 'avatuber-bg';
+const BG_MAX_SIDE = 1920;          // більша сторона збереженого фото, px — щоб влазило в localStorage
+let bgMode = 'bg-dark';            // поточний клас <body>
+let bgBeforeLive = 'bg-dark';      // куди повернутися, коли live вимкнуть
+let camStream = null, camBusy = false;
+
+function bgStatus(text) { document.getElementById('status').textContent = text; }
+function bgList() { return bgImg.getAttribute('src') ? ['bg-dark', '', 'bg-green', 'bg-custom'] : ['bg-dark', '', 'bg-green']; }
+function setBg(mode) {
+  if (mode !== 'bg-live') stopLive();
+  bgMode = mode;
+  document.body.className = mode;
 }
+function cycleBg() {
+  const list = bgList();
+  setBg(list[(list.indexOf(bgMode) + 1) % list.length]);   // з live (-1) — на перший
+}
+
+/* Кадр (картинка чи відео) → зменшений JPEG → свій фон; mirror — віддзеркалити, як було видно на екрані */
+function setCustomBg(source, w, h, mirror) {
+  const k = Math.min(1, BG_MAX_SIDE / Math.max(w, h));
+  const c = document.createElement('canvas');
+  c.width = Math.round(w * k);
+  c.height = Math.round(h * k);
+  const g = c.getContext('2d');
+  if (mirror) { g.translate(c.width, 0); g.scale(-1, 1); }
+  g.drawImage(source, 0, 0, c.width, c.height);
+  const url = c.toDataURL('image/jpeg', 0.85);
+  bgImg.src = url;
+  try { localStorage.setItem(BG_KEY, url); }
+  catch { bgStatus('⚠ Фон показано, але не збережено: браузер не дав місця в сховищі.'); }
+  setBg('bg-custom');
+}
+
+document.getElementById('fileBtn').onclick = () => document.getElementById('bgFile').click();
+document.getElementById('bgFile').onchange = ev => {
+  const file = ev.target.files[0];
+  ev.target.value = '';                 // щоб той самий файл можна було вибрати ще раз
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  const im = new Image();
+  im.onload = () => { setCustomBg(im, im.naturalWidth, im.naturalHeight, false); URL.revokeObjectURL(url); };
+  im.onerror = () => { bgStatus('⚠ Не вдалося відкрити зображення.'); URL.revokeObjectURL(url); };
+  im.src = url;
+};
+
+/* Live: відео з камери як фон. На телефоні — задня камера (видно, що навколо), на ПК — яка є. */
+async function startLive() {
+  if (camStream) return true;
+  if (camBusy) return false;
+  camBusy = true;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+    camStream = stream;
+    const track = stream.getVideoTracks()[0];
+    // Камеру можуть забрати ззовні (інша програма, iOS у фоні) — вимикаємось чесно
+    track.onended = () => { stopLive(); bgStatus('⚠ Камеру від\'єднано.'); };
+    // Фронтальна камера чи вебкамера ПК (facingMode невідомий) — показуємо дзеркально
+    bgVideo.classList.toggle('mirror', track.getSettings().facingMode !== 'environment');
+    bgVideo.srcObject = stream;
+    await bgVideo.play();
+    if (bgMode !== 'bg-live') bgBeforeLive = bgMode;
+    bgMode = 'bg-live';
+    document.body.className = 'bg-live';
+    liveBtn.classList.add('active');
+    return true;
+  } catch (err) {
+    stopLive();
+    bgStatus('⚠ Немає доступу до камери: ' + err.message);
+    return false;
+  } finally {
+    camBusy = false;
+  }
+}
+function stopLive() {
+  if (camStream) for (const t of camStream.getTracks()) t.stop();
+  camStream = null;
+  bgVideo.srcObject = null;
+  liveBtn.classList.remove('active');
+  photoBtn.classList.remove('active');
+  photoBtn.textContent = '📷 Фото';
+  if (bgMode === 'bg-live') { bgMode = bgBeforeLive; document.body.className = bgMode; }
+}
+liveBtn.onclick = () => { if (camStream) stopLive(); else startLive(); };
+
+/* Фото: камера вже працює — знімаємо кадр; ні — вмикаємо live, щоб навести, і чекаємо другого натискання */
+photoBtn.onclick = async () => {
+  if (camStream && bgVideo.videoWidth) {
+    setCustomBg(bgVideo, bgVideo.videoWidth, bgVideo.videoHeight, bgVideo.classList.contains('mirror'));
+    bgStatus('📷 Фото стало фоном.');
+    return;
+  }
+  if (!(await startLive())) return;
+  photoBtn.classList.add('active');
+  photoBtn.textContent = '📸 Зняти';
+  bgStatus('Наведи камеру й натисни «📸 Зняти».');
+};
+
+// Збережене фото — одразу фоном
+try {
+  const saved = localStorage.getItem(BG_KEY);
+  if (saved) { bgImg.src = saved; setBg('bg-custom'); }
+} catch {}
 function togglePanel() { document.getElementById('panel').classList.toggle('hidden'); }
 
 addEventListener('keydown', ev => {
@@ -604,8 +723,9 @@ document.getElementById('togglePanel').onclick = togglePanel;
 
 /* URL-параметри для OBS: ?bg=transparent&panel=0&auto=1 */
 const q = new URLSearchParams(location.search);
-if (q.get('bg') === 'transparent') { bgI = 1; document.body.className = ''; }
-if (q.get('bg') === 'green') { bgI = 2; document.body.className = 'bg-green'; }
+if (q.get('bg') === 'transparent') setBg('');
+if (q.get('bg') === 'green') setBg('bg-green');
+if (q.get('bg') === 'dark') setBg('bg-dark');
 if (q.get('panel') === '0') {
   // Режим OBS: ні панелі, ні кнопки шестерні в кадрі
   document.getElementById('panel').classList.add('hidden');
