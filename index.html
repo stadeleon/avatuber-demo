@@ -42,6 +42,7 @@
   select, button { background:#33333d; color:#eee; border:1px solid #555; border-radius:6px; padding:5px 4px; cursor:pointer; font-size:12px; }
   button.active { background:#4a7cff; border-color:#4a7cff; }
   #start { width:100%; padding:8px; font-size:13px; background:#4a7cff; border:none; }
+  #start.on { background:#c2414b; }   /* мікрофон увімкнено — кнопка вимикає */
   .hint { color:#999; line-height:1.45; margin-top:6px; }
   #status { color:#ffcc66; margin:6px 0; }
   #panel { z-index:1; }
@@ -209,14 +210,30 @@ let analyser = null, timeBuf, freqBuf, sampleRate = 48000;
 let noiseFloor = -60;    // автоматично підлаштовуваний рівень шуму, дБ
 let prevMag = null;      // попередній спектр — для обчислення спектральної зміни (flux)
 
+let micStream = null;    // потік мікрофона — щоб зупинити доріжки при вимкненні
+let micCtx = null;       // AudioContext — закриваємо при вимкненні, щоб звільнити аудіо-пристрій
+let micBusy = false;     // захист від подвійного натискання, поки браузер питає дозвіл
+
+const startBtn = document.getElementById('start');
+function setMicButton(on) {
+  startBtn.textContent = on ? '⏹ Вимкнути мікрофон' : '▶ Увімкнути мікрофон';
+  startBtn.classList.toggle('on', on);
+}
+
 async function startMic() {
+  if (micBusy || analyser) return;
+  micBusy = true;
   const status = document.getElementById('status');
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       // AGC вимкнено, інакше браузер "вирівнює" гучність і крик не відрізнити від шепоту
       audio: { echoCancellation:false, noiseSuppression:true, autoGainControl:false }
     });
+    micStream = stream;
+    // Пристрій можуть забрати ззовні (від'єднали гарнітуру, iOS перервала аудіо) — тоді вимикаємось чесно
+    for (const t of stream.getAudioTracks()) t.onended = () => stopMic('⚠ Мікрофон від\'єднано. Працює демо.');
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    micCtx = ctx;
     sampleRate = ctx.sampleRate;
     // В OBS/без кліку контекст може стартувати "призупиненим" — будимо його
     if (ctx.state === 'suspended') ctx.resume();
@@ -230,12 +247,26 @@ async function startMic() {
     freqBuf = new Float32Array(analyser.frequencyBinCount);
     status.textContent = '🎙 Мікрофон працює. Помовчи 2 с для калібрування шуму.';
     noiseFloor = -50;
-    document.getElementById('start').style.display = 'none';
+    setMicButton(true);
   } catch (err) {
     status.textContent = '⚠ Немає доступу до мікрофона: ' + err.message + '. Працює демо на Пробілі.';
+  } finally {
+    micBusy = false;
   }
 }
-document.getElementById('start').onclick = startMic;
+
+/* Вимкнення: зупиняємо доріжки (браузер прибирає індикатор запису — на iPhone гасне помаранчева крапка),
+   закриваємо AudioContext і повертаємось у демо-режим. Рот закриється сам — гучність падає в нуль. */
+function stopMic(message = '🔇 Мікрофон вимкнено. Демо: утримуй «Говорити» / «Кричати» (або Пробіл).') {
+  if (micStream) for (const t of micStream.getTracks()) { t.onended = null; t.stop(); }
+  if (micCtx && micCtx.state !== 'closed') micCtx.close().catch(() => {});
+  micStream = null; micCtx = null; analyser = null; prevMag = null;
+  noiseFloor = -60;
+  setMicButton(false);
+  document.getElementById('status').textContent = message;
+}
+
+startBtn.onclick = () => (analyser ? stopMic() : startMic());
 
 /* Демо-режим: Пробіл імітує голос, Shift+Пробіл — крик */
 let demoKey = 0;   // 0 — тиша, 0.5 — розмова, 1 — крик

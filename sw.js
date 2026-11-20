@@ -4,7 +4,7 @@
  * відкриття мережа не потрібна взагалі. Оновлення приходять так: tools/build_pwa.sh вписує
  * в VERSION хеш вмісту, браузер бачить змінений sw.js, ставить новий кеш і видаляє старий.
  */
-const VERSION = '9fabec782d9b';
+const VERSION = '54200a4aa1e7';
 const CACHE = `avatuber-${VERSION}`;
 const FILES = ['./', './manifest.webmanifest', './apple-touch-icon.png', './icon-192.png', './icon-512.png'];
 
